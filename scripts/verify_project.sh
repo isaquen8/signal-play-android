@@ -3,7 +3,7 @@ set -euo pipefail
 
 required_protocols=(srt hls rtmp rtp udp)
 for protocol in "${required_protocols[@]}"; do
-  rg -qi "$protocol" README.md app/src/main || {
+  grep -Rqi -- "$protocol" README.md app/src/main || {
     echo "Protocolo ausente: $protocol" >&2
     exit 1
   }
@@ -13,7 +13,7 @@ test -f app/src/main/AndroidManifest.xml
 test -f app/src/main/java/com/isaque/signalplay/MainActivity.kt
 test -f app/src/test/java/com/isaque/signalplay/ProtocolContractTest.kt
 
-if rg -n 'CAMERA|RECORD_AUDIO|READ_MEDIA|READ_EXTERNAL|WRITE_EXTERNAL' app/src/main/AndroidManifest.xml; then
+if grep -En 'CAMERA|RECORD_AUDIO|READ_MEDIA|READ_EXTERNAL|WRITE_EXTERNAL' app/src/main/AndroidManifest.xml; then
   echo "Permissão invasiva encontrada no manifesto" >&2
   exit 1
 fi
