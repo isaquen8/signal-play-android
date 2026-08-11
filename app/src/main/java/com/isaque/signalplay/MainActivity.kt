@@ -3,12 +3,13 @@ package com.isaque.signalplay
 import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.isVisible
 import com.google.android.material.snackbar.Snackbar
 import com.isaque.signalplay.databinding.ActivityMainBinding
@@ -129,15 +130,15 @@ class MainActivity : AppCompatActivity() {
     private fun setFullscreen(enabled: Boolean) {
         fullscreen = enabled
         binding.controlPanel.isVisible = !enabled
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         if (enabled) {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            window.insetsController?.let {
-                it.hide(WindowInsets.Type.systemBars())
-                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            }
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         } else {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-            window.insetsController?.show(WindowInsets.Type.systemBars())
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
         }
     }
 
