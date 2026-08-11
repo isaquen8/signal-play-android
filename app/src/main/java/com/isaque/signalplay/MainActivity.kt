@@ -150,7 +150,7 @@ class MainActivity : AppCompatActivity() {
         }
         player.media = media
         media.release()
-        if (!player.play()) showPlaybackError("O LibVLC recusou o endereço antes de iniciar a conexão.")
+        player.play()
     }
 
     private fun stopSignal() {
