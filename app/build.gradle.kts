@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.isaque.signalplay"
     compileSdk = 36
+    ndkVersion = "28.0.13004108"
 
     defaultConfig {
         applicationId = "com.isaque.signalplay"
@@ -18,7 +19,7 @@ android {
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             ndkBuild {
-                arguments += "GSTREAMER_ROOT_ANDROID=${System.getenv("GSTREAMER_ROOT_ANDROID") ?: "missing-gstreamer-sdk"}"
+                arguments += "GSTREAMER_ROOT=${System.getenv("GSTREAMER_ROOT_ANDROID") ?: "missing-gstreamer-sdk"}"
             }
         }
     }

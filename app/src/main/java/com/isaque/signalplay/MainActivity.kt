@@ -285,7 +285,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun normalizeSrtAddress(address: String): String {
         if (!address.contains(Regex("(?i)[?&]mode=listener(?:&|$)"))) return address
-        return address.replace(Regex("(?i)^srt://(?:0\.0\.0\.0|@)(?=:)"), "srt://")
+        return address.replace(Regex("""(?i)^srt://(?:0\.0\.0\.0|@)(?=:)"""), "srt://")
     }
 
     private fun setFullscreen(enabled: Boolean) {

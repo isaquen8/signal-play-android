@@ -9,4 +9,4 @@ include $(BUILD_SHARED_LIBRARY)
 
 GSTREAMER_PLUGINS := $(GSTREAMER_PLUGINS_CORE) $(GSTREAMER_PLUGINS_PLAYBACK) $(GSTREAMER_PLUGINS_CODECS) $(GSTREAMER_PLUGINS_NET) $(GSTREAMER_PLUGINS_SYS) mpegtsdemux
 GSTREAMER_EXTRA_DEPS := gstreamer-video-1.0
-include $(GSTREAMER_ROOT_ANDROID)/share/gst-android/ndk-build/gstreamer-1.0.mk
+include $(GSTREAMER_ROOT)/share/gst-android/ndk-build/gstreamer-1.0.mk
