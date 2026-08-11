@@ -20,6 +20,7 @@ android {
         externalNativeBuild {
             ndkBuild {
                 arguments += "GSTREAMER_ROOT=${System.getenv("GSTREAMER_ROOT_ANDROID") ?: "missing-gstreamer-sdk"}"
+                targets += "signalplay_srt"
             }
         }
     }
