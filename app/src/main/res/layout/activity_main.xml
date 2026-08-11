@@ -8,6 +8,13 @@
 
     <FrameLayout android:id="@+id/videoFrame" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:background="#000000">
         <org.videolan.libvlc.util.VLCVideoLayout android:id="@+id/videoLayout" android:layout_width="match_parent" android:layout_height="match_parent" />
+        <androidx.media3.ui.PlayerView
+            android:id="@+id/hlsPlayerView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone"
+            app:show_buffering="always"
+            app:use_controller="false" />
         <LinearLayout android:id="@+id/emptyState" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center" android:gravity="center" android:orientation="vertical" android:padding="24dp">
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="SIGNAL PLAY" android:textColor="@color/paper" android:textSize="20sp" android:textStyle="bold" />
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Pronto para receber um sinal" android:textColor="@color/muted" android:textSize="14sp" />
@@ -30,6 +37,14 @@
             <com.google.android.material.textfield.TextInputEditText android:id="@+id/urlInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:imeOptions="actionGo" android:inputType="textUri" android:maxLines="2" android:text="srt://0.0.0.0:9000?mode=listener" android:textColor="@color/paper" />
         </com.google.android.material.textfield.TextInputLayout>
         <TextView android:id="@+id/helperText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="Para receber SRT, use mode=listener." android:textColor="@color/muted" android:textSize="12sp" />
+        <TextView
+            android:id="@+id/diagnosticText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textColor="@color/muted"
+            android:textSize="12sp"
+            android:visibility="gone" />
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:gravity="end" android:orientation="horizontal">
             <com.google.android.material.button.MaterialButton android:id="@+id/historyButton" style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Recentes" />
             <com.google.android.material.button.MaterialButton android:id="@+id/stopButton" style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:enabled="false" android:text="Parar" />

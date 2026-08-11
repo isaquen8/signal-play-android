@@ -2,6 +2,8 @@ package com.isaque.signalplay
 
 import android.content.pm.ActivityInfo
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -11,6 +13,11 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.isVisible
+import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
 import com.google.android.material.snackbar.Snackbar
 import com.isaque.signalplay.databinding.ActivityMainBinding
 import org.videolan.libvlc.LibVLC
@@ -21,8 +28,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var libVlc: LibVLC
     private lateinit var player: MediaPlayer
+    private lateinit var hlsPlayer: ExoPlayer
     private lateinit var recents: RecentStreams
     private var fullscreen = false
+    private var activeEngine = Engine.NONE
+    private val timeoutHandler = Handler(Looper.getMainLooper())
+    private val connectionTimeout = Runnable {
+        if (activeEngine != Engine.NONE && binding.statusBadge.text != "NO AR") {
+            showPlaybackError("Tempo limite de 15 segundos. O servidor não entregou áudio ou vídeo.")
+        }
+    }
+
+    private enum class Engine { NONE, VLC, HLS }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,6 +52,22 @@ class MainActivity : AppCompatActivity() {
         player = MediaPlayer(libVlc).also {
             it.attachViews(binding.videoLayout, null, false, false)
             it.setEventListener(::onPlayerEvent)
+        }
+        hlsPlayer = ExoPlayer.Builder(this).build().also {
+            binding.hlsPlayerView.player = it
+            it.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(state: Int) {
+                    when (state) {
+                        Player.STATE_BUFFERING -> setStatus("BUFFER", false)
+                        Player.STATE_READY -> if (it.playWhenReady) markPlaying()
+                        Player.STATE_ENDED -> stopSignal()
+                    }
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    showPlaybackError("HLS: ${error.errorCodeName}. ${error.cause?.message ?: error.message}")
+                }
+            })
         }
 
         bindActions()
@@ -71,44 +104,97 @@ class MainActivity : AppCompatActivity() {
 
     private fun openSignal() {
         binding.urlLayout.error = null
+        binding.diagnosticText.isVisible = false
         StreamAddress.validate(binding.urlInput.text?.toString().orEmpty())
             .onFailure { binding.urlLayout.error = it.message }
             .onSuccess { address ->
-                player.stop()
-                val media = Media(libVlc, android.net.Uri.parse(address))
-                media.setHWDecoderEnabled(true, false)
-                media.addOption(":network-caching=1000")
-                player.media = media
-                media.release()
+                stopPlayers()
                 recents.add(address)
                 binding.emptyState.isVisible = false
                 binding.playButton.isEnabled = false
                 binding.stopButton.isEnabled = true
                 setStatus("CONECTANDO", false)
-                player.play()
+                timeoutHandler.removeCallbacks(connectionTimeout)
+                timeoutHandler.postDelayed(connectionTimeout, 15_000)
+                if (address.substringBefore(":").lowercase() in setOf("http", "https")) {
+                    openHls(address)
+                } else {
+                    openVlc(address)
+                }
             }
     }
 
+    private fun openHls(address: String) {
+        activeEngine = Engine.HLS
+        binding.videoLayout.isVisible = false
+        binding.hlsPlayerView.isVisible = true
+        val item = ExoMediaItem.Builder()
+            .setUri(address)
+            .setMimeType(MimeTypes.APPLICATION_M3U8)
+            .build()
+        hlsPlayer.setMediaItem(item)
+        hlsPlayer.prepare()
+        hlsPlayer.playWhenReady = true
+    }
+
+    private fun openVlc(address: String) {
+        activeEngine = Engine.VLC
+        binding.hlsPlayerView.isVisible = false
+        binding.videoLayout.isVisible = true
+        val media = Media(libVlc, android.net.Uri.parse(address)).apply {
+            setHWDecoderEnabled(true, false)
+            addOption(":network-caching=1200")
+            addOption(":live-caching=1200")
+            addOption(":clock-jitter=0")
+            addOption(":clock-synchro=0")
+        }
+        player.media = media
+        media.release()
+        if (!player.play()) showPlaybackError("O LibVLC recusou o endereço antes de iniciar a conexão.")
+    }
+
     private fun stopSignal() {
-        player.stop()
+        stopPlayers()
         binding.emptyState.isVisible = true
         binding.playButton.isEnabled = true
         binding.stopButton.isEnabled = false
         setStatus("PARADO", false)
     }
 
+    private fun stopPlayers() {
+        timeoutHandler.removeCallbacks(connectionTimeout)
+        if (::player.isInitialized) player.stop()
+        if (::hlsPlayer.isInitialized) hlsPlayer.stop()
+        activeEngine = Engine.NONE
+    }
+
     private fun onPlayerEvent(event: MediaPlayer.Event) = runOnUiThread {
         when (event.type) {
-            MediaPlayer.Event.Playing -> { setStatus("NO AR", true); binding.playButton.isEnabled = true }
+            MediaPlayer.Event.Playing -> markPlaying()
             MediaPlayer.Event.Buffering -> if (event.buffering < 100f) setStatus("BUFFER ${event.buffering.toInt()}%", false)
-            MediaPlayer.Event.EncounteredError -> {
-                binding.playButton.isEnabled = true
-                binding.stopButton.isEnabled = false
-                setStatus("SEM SINAL", false)
-                Snackbar.make(binding.root, "Não foi possível abrir o sinal. Confira o endereço e a rede.", Snackbar.LENGTH_LONG).show()
-            }
+            MediaPlayer.Event.EncounteredError -> showPlaybackError(
+                "LibVLC não abriu o sinal. Confira modo, IP, porta, passphrase e se o emissor já está ativo."
+            )
             MediaPlayer.Event.EndReached -> stopSignal()
         }
+    }
+
+    private fun markPlaying() {
+        timeoutHandler.removeCallbacks(connectionTimeout)
+        binding.playButton.isEnabled = true
+        binding.stopButton.isEnabled = true
+        binding.diagnosticText.isVisible = false
+        setStatus("NO AR", true)
+    }
+
+    private fun showPlaybackError(message: String) {
+        timeoutHandler.removeCallbacks(connectionTimeout)
+        binding.playButton.isEnabled = true
+        binding.stopButton.isEnabled = false
+        binding.diagnosticText.text = message
+        binding.diagnosticText.isVisible = true
+        setStatus("SEM SINAL", false)
+        Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG).show()
     }
 
     private fun setStatus(text: String, live: Boolean) {
@@ -147,6 +233,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        timeoutHandler.removeCallbacksAndMessages(null)
+        hlsPlayer.release()
         player.stop(); player.detachViews(); player.release(); libVlc.release()
         super.onDestroy()
     }
