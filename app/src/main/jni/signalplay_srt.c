@@ -91,7 +91,32 @@ static void *player_thread(void *opaque) {
         return NULL;
     }
 
-    g_object_set(data->playbin, "uri", data->uri, NULL);
+    /*
+     * Broadcast MPEG-TS feeds can carry PCR/PTS values that are valid for the
+     * encoder clock but far ahead of Android's playback clock.  A synchronized
+     * video sink then renders the first preroll frame and waits indefinitely.
+     * SRT is live, so render frames as soon as they reach the device.
+     */
+    GstElement *video_sink = gst_element_factory_make("glimagesink", "signal-play-video");
+    GstElement *audio_sink = gst_element_factory_make("openslessink", "signal-play-audio");
+    if (video_sink) {
+        g_object_set(video_sink,
+                     "sync", FALSE,
+                     "qos", FALSE,
+                     "enable-last-sample", FALSE,
+                     NULL);
+    }
+    if (audio_sink) {
+        g_object_set(audio_sink, "sync", FALSE, NULL);
+    }
+
+    g_object_set(data->playbin,
+                 "uri", data->uri,
+                 "video-sink", video_sink,
+                 "audio-sink", audio_sink,
+                 NULL);
+    if (video_sink) gst_object_unref(video_sink);
+    if (audio_sink) gst_object_unref(audio_sink);
 
     GstBus *bus = gst_element_get_bus(data->playbin);
     gst_bus_set_sync_handler(bus, bus_sync, data, NULL);
@@ -115,6 +140,22 @@ static void *player_thread(void *opaque) {
                 gint percent = 0; gst_message_parse_buffering(message, &percent);
                 gchar *detail = g_strdup_printf("Buffer %d%%", percent);
                 send_state(data, "BUFFERING", detail); g_free(detail);
+                break;
+            }
+            case GST_MESSAGE_QOS: {
+                gboolean live = FALSE;
+                guint64 running_time = GST_CLOCK_TIME_NONE;
+                guint64 stream_time = GST_CLOCK_TIME_NONE;
+                guint64 timestamp = GST_CLOCK_TIME_NONE;
+                guint64 duration = GST_CLOCK_TIME_NONE;
+                gst_message_parse_qos(message, &live, &running_time, &stream_time,
+                                      &timestamp, &duration);
+                gchar *detail = g_strdup_printf(
+                    "QoS: live=%s, timestamp=%" GST_TIME_FORMAT ", duração=%" GST_TIME_FORMAT,
+                    live ? "sim" : "não",
+                    GST_TIME_ARGS(timestamp), GST_TIME_ARGS(duration));
+                send_diagnostics(data, detail);
+                g_free(detail);
                 break;
             }
             case GST_MESSAGE_STATE_CHANGED:
