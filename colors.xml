@@ -1,0 +1,8 @@
+<resources>
+    <color name="ink">#101214</color>
+    <color name="panel">#191C1F</color>
+    <color name="paper">#F4F5F6</color>
+    <color name="muted">#A9AFB5</color>
+    <color name="signal">#49D17D</color>
+    <color name="danger">#FF6B6B</color>
+</resources>

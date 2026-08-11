@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ink"
+    android:orientation="vertical">
+
+    <FrameLayout android:id="@+id/videoFrame" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:background="#000000">
+        <org.videolan.libvlc.util.VLCVideoLayout android:id="@+id/videoLayout" android:layout_width="match_parent" android:layout_height="match_parent" />
+        <LinearLayout android:id="@+id/emptyState" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center" android:gravity="center" android:orientation="vertical" android:padding="24dp">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="SIGNAL PLAY" android:textColor="@color/paper" android:textSize="20sp" android:textStyle="bold" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Pronto para receber um sinal" android:textColor="@color/muted" android:textSize="14sp" />
+        </LinearLayout>
+        <TextView android:id="@+id/statusBadge" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="top|start" android:layout_margin="14dp" android:background="@color/panel" android:paddingHorizontal="10dp" android:paddingVertical="6dp" android:text="PARADO" android:textColor="@color/muted" android:textSize="11sp" android:textStyle="bold" />
+        <ImageButton android:id="@+id/fullscreenButton" android:layout_width="48dp" android:layout_height="48dp" android:layout_gravity="bottom|end" android:layout_margin="8dp" android:background="?attr/selectableItemBackgroundBorderless" android:contentDescription="Tela cheia" android:padding="12dp" android:src="@android:drawable/ic_menu_view" app:tint="@color/paper" />
+    </FrameLayout>
+
+    <LinearLayout android:id="@+id/controlPanel" android:layout_width="match_parent" android:layout_height="wrap_content" android:background="@color/panel" android:orientation="vertical" android:padding="16dp">
+        <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content" android:scrollbars="none">
+            <com.google.android.material.chip.ChipGroup android:id="@+id/protocolGroup" android:layout_width="wrap_content" android:layout_height="wrap_content" app:selectionRequired="true" app:singleSelection="true">
+                <com.google.android.material.chip.Chip android:id="@+id/chipSrt" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:checked="true" android:text="SRT" />
+                <com.google.android.material.chip.Chip android:id="@+id/chipHls" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="HLS" />
+                <com.google.android.material.chip.Chip android:id="@+id/chipRtmp" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="RTMP" />
+                <com.google.android.material.chip.Chip android:id="@+id/chipRtp" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="RTP" />
+                <com.google.android.material.chip.Chip android:id="@+id/chipUdp" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="UDP" />
+            </com.google.android.material.chip.ChipGroup>
+        </HorizontalScrollView>
+        <com.google.android.material.textfield.TextInputLayout android:id="@+id/urlLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="Endereço do sinal" app:endIconMode="clear_text">
+            <com.google.android.material.textfield.TextInputEditText android:id="@+id/urlInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:imeOptions="actionGo" android:inputType="textUri" android:maxLines="2" android:text="srt://0.0.0.0:9000?mode=listener" android:textColor="@color/paper" />
+        </com.google.android.material.textfield.TextInputLayout>
+        <TextView android:id="@+id/helperText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:text="Para receber SRT, use mode=listener." android:textColor="@color/muted" android:textSize="12sp" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:gravity="end" android:orientation="horizontal">
+            <com.google.android.material.button.MaterialButton android:id="@+id/historyButton" style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Recentes" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/stopButton" style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:enabled="false" android:text="Parar" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/playButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:text="Abrir sinal" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>
