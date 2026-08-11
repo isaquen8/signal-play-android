@@ -14,6 +14,7 @@ typedef struct {
     gboolean thread_started;
     gboolean stopping;
     gchar *uri;
+    gint de_jitter_ms;
 } PlayerData;
 
 static JavaVM *java_vm;
@@ -102,12 +103,13 @@ static void *player_thread(void *opaque) {
     if (video_sink) {
         g_object_set(video_sink,
                      "sync", FALSE,
+                     "async", FALSE,
                      "qos", FALSE,
                      "enable-last-sample", FALSE,
                      NULL);
     }
     if (audio_sink) {
-        g_object_set(audio_sink, "sync", FALSE, NULL);
+        g_object_set(audio_sink, "sync", FALSE, "async", FALSE, NULL);
     }
 
     g_object_set(data->playbin,
@@ -117,6 +119,12 @@ static void *player_thread(void *opaque) {
                  NULL);
     if (video_sink) gst_object_unref(video_sink);
     if (audio_sink) gst_object_unref(audio_sink);
+    if (data->de_jitter_ms > 0 &&
+        g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "buffer-duration")) {
+        g_object_set(data->playbin,
+                     "buffer-duration", (gint64) data->de_jitter_ms * GST_MSECOND,
+                     NULL);
+    }
 
     GstBus *bus = gst_element_get_bus(data->playbin);
     gst_bus_set_sync_handler(bus, bus_sync, data, NULL);
@@ -170,6 +178,10 @@ static void *player_thread(void *opaque) {
                 gst_message_parse_stream_collection(message, &collection);
                 gchar *report = stream_report(collection);
                 send_diagnostics(data, report);
+                gchar *detail = g_strdup_printf(
+                    "Mídia detectada; de-jitter configurado em %d ms.", data->de_jitter_ms);
+                send_state(data, "MEDIA", detail);
+                g_free(detail);
                 g_free(report); gst_object_unref(collection);
                 break;
             }
@@ -211,7 +223,7 @@ JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeCreate(JNIEnv 
     pthread_mutex_unlock(&player_lock);
 }
 
-JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativePlay(JNIEnv *env, jobject thiz, jstring uri, jobject surface) {
+JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativePlay(JNIEnv *env, jobject thiz, jstring uri, jobject surface, jint de_jitter_ms) {
     if (!singleton) return;
     if (singleton->thread_started) {
         singleton->stopping = TRUE;
@@ -224,6 +236,7 @@ JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativePlay(JNIEnv *e
     (*env)->ReleaseStringUTFChars(env, uri, value);
     if (singleton->window) ANativeWindow_release(singleton->window);
     singleton->window = ANativeWindow_fromSurface(env, surface);
+    singleton->de_jitter_ms = de_jitter_ms < 0 ? 0 : de_jitter_ms;
     singleton->stopping = FALSE;
     singleton->thread_started = pthread_create(&singleton->thread, NULL, player_thread, singleton) == 0;
 }

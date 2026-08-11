@@ -11,6 +11,7 @@ import android.view.View
 import android.view.SurfaceHolder
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
@@ -34,9 +35,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var player: MediaPlayer
     private lateinit var hlsPlayer: ExoPlayer
     private lateinit var recents: RecentStreams
+    private lateinit var favorites: FavoriteStreams
     private lateinit var srtPlayer: SrtPlayer
     private var fullscreen = false
     private var pendingSrtAddress: String? = null
+    private var pendingSrtDeJitterMs = 200
+    private var activePrivateAddress: String? = null
     private var diagnostics = "Nenhum sinal analisado ainda."
     private var activeEngine = Engine.NONE
     private val timeoutHandler = Handler(Looper.getMainLooper())
@@ -54,7 +58,9 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        recents = RecentStreams(getSharedPreferences("signal_play", MODE_PRIVATE))
+        val preferences = getSharedPreferences("signal_play", MODE_PRIVATE)
+        recents = RecentStreams(preferences)
+        favorites = FavoriteStreams(preferences)
         libVlc = LibVLC(this, arrayListOf("--network-caching=1000", "--clock-jitter=0", "--clock-synchro=0"))
         player = MediaPlayer(libVlc).also {
             it.attachViews(binding.videoLayout, null, false, false)
@@ -78,25 +84,25 @@ class MainActivity : AppCompatActivity() {
         }
         srtPlayer = SrtPlayer(this, object : SrtPlayer.Listener {
             override fun onSrtState(state: String, detail: String) = runOnUiThread {
-                diagnostics = appendDiagnostic("Estado SRT: $state\n$detail")
+                diagnostics = appendDiagnostic("Estado SRT: $state\n${sanitizeDiagnostic(detail)}")
                 when (state) {
                     "CONNECTING" -> setStatus("CONECTANDO", false)
                     "BUFFERING" -> setStatus("BUFFER", false)
-                    "PLAYING" -> markPlaying()
+                    "MEDIA", "PLAYING" -> markPlaying()
                     "ENDED" -> stopSignal()
-                    "ERROR" -> showPlaybackError("SRT: $detail")
+                    "ERROR" -> showPlaybackError("SRT: ${sanitizeDiagnostic(detail)}")
                 }
             }
 
             override fun onSrtDiagnostics(report: String) = runOnUiThread {
-                diagnostics = appendDiagnostic(report)
+                diagnostics = appendDiagnostic(sanitizeDiagnostic(report))
             }
         })
         binding.srtSurface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
                 pendingSrtAddress?.let {
                     pendingSrtAddress = null
-                    srtPlayer.play(normalizeSrtAddress(it), holder.surface)
+                    srtPlayer.play(normalizeSrtAddress(it), holder.surface, pendingSrtDeJitterMs)
                 }
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
@@ -110,6 +116,8 @@ class MainActivity : AppCompatActivity() {
         playButton.setOnClickListener { openSignal() }
         stopButton.setOnClickListener { stopSignal() }
         historyButton.setOnClickListener { showHistory() }
+        favoritesButton.setOnClickListener { showFavorites() }
+        saveFavoriteButton.setOnClickListener { saveFavorite() }
         diagnosticsButton.setOnClickListener { showDiagnostics() }
         fullscreenButton.setOnClickListener { setFullscreen(!fullscreen) }
         urlInput.setOnEditorActionListener { _, action, _ ->
@@ -121,7 +129,7 @@ class MainActivity : AppCompatActivity() {
                 R.id.chipRtmp -> "rtmp://servidor.exemplo/live/canal"
                 R.id.chipRtp -> "rtp://@:5004"
                 R.id.chipUdp -> "udp://@:5000"
-                else -> "srt://0.0.0.0:9000?mode=listener"
+                else -> "srt://servidor.exemplo:9000"
             }
             urlInput.setText(preset)
             urlInput.setSelection(preset.length)
@@ -133,6 +141,12 @@ class MainActivity : AppCompatActivity() {
                 R.id.chipUdp -> "Use @ para escutar em todas as interfaces, por exemplo udp://@:5000."
                 else -> ""
             }
+            srtOptionsPanel.isVisible = checked.firstOrNull() == R.id.chipSrt
+        }
+        srtModeGroup.setOnCheckedStateChangeListener { _, checked ->
+            helperText.text = if (checked.firstOrNull() == R.id.chipListener)
+                "Listener: o aparelho aguarda uma conexão na porta informada."
+            else "Caller: o aparelho conecta ao endereço remoto informado."
         }
     }
 
@@ -142,34 +156,37 @@ class MainActivity : AppCompatActivity() {
         StreamAddress.validate(binding.urlInput.text?.toString().orEmpty())
             .onFailure { binding.urlLayout.error = it.message }
             .onSuccess { address ->
+                val finalAddress = if (address.startsWith("srt://", true)) configuredSrtAddress(address) else address
                 stopPlayers()
-                recents.add(address)
+                activePrivateAddress = finalAddress
+                recents.add(finalAddress)
                 binding.emptyState.isVisible = false
                 binding.playButton.isEnabled = false
                 binding.stopButton.isEnabled = true
                 setStatus("CONECTANDO", false)
                 timeoutHandler.removeCallbacks(connectionTimeout)
                 timeoutHandler.postDelayed(connectionTimeout, 15_000)
-                diagnostics = "Protocolo: ${address.substringBefore(":").uppercase()}\nEndereço: ${maskAddress(address)}"
-                if (address.startsWith("srt://", ignoreCase = true)) {
-                    openSrt(address)
-                } else if (address.substringBefore(":").lowercase() in setOf("http", "https")) {
-                    openHls(address)
+                diagnostics = "Protocolo: ${finalAddress.substringBefore(":").uppercase()}\nEndereço: ${privateAddressLabel(finalAddress)}"
+                if (finalAddress.startsWith("srt://", ignoreCase = true)) {
+                    openSrt(finalAddress, selectedDeJitterMs())
+                } else if (finalAddress.substringBefore(":").lowercase() in setOf("http", "https")) {
+                    openHls(finalAddress)
                 } else {
-                    openVlc(address)
+                    openVlc(finalAddress)
                 }
             }
     }
 
-    private fun openSrt(address: String) {
+    private fun openSrt(address: String, deJitterMs: Int) {
         activeEngine = Engine.SRT
         binding.videoLayout.isVisible = false
         binding.hlsPlayerView.isVisible = false
         binding.srtSurface.isVisible = true
         if (binding.srtSurface.holder.surface.isValid) {
-            srtPlayer.play(normalizeSrtAddress(address), binding.srtSurface.holder.surface)
+            srtPlayer.play(normalizeSrtAddress(address), binding.srtSurface.holder.surface, deJitterMs)
         } else {
             pendingSrtAddress = address
+            pendingSrtDeJitterMs = deJitterMs
         }
     }
 
@@ -217,6 +234,7 @@ class MainActivity : AppCompatActivity() {
         if (::hlsPlayer.isInitialized) hlsPlayer.stop()
         if (::srtPlayer.isInitialized) srtPlayer.stop()
         pendingSrtAddress = null
+        activePrivateAddress = null
         activeEngine = Engine.NONE
     }
 
@@ -261,8 +279,92 @@ class MainActivity : AppCompatActivity() {
             return
         }
         AlertDialog.Builder(this).setTitle("Sinais recentes")
-            .setItems(items.toTypedArray()) { _, index -> binding.urlInput.setText(items[index]) }
+            .setItems(items.map(::privateAddressLabel).toTypedArray()) { _, index -> loadAddress(items[index]) }
             .setNegativeButton("Fechar", null).show()
+    }
+
+    private fun saveFavorite() {
+        val raw = binding.urlInput.text?.toString().orEmpty().trim()
+        StreamAddress.validate(raw).onFailure {
+            binding.urlLayout.error = it.message
+        }.onSuccess { address ->
+            val nameInput = EditText(this).apply { hint = "Ex.: Estúdio 1" }
+            AlertDialog.Builder(this)
+                .setTitle("Salvar como favorito")
+                .setView(nameInput)
+                .setPositiveButton("Salvar") { _, _ ->
+                    val name = nameInput.text.toString().trim()
+                    if (name.isBlank()) {
+                        Snackbar.make(binding.root, "Informe um nome para o favorito.", Snackbar.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+                    val protocol = address.substringBefore(":").uppercase()
+                    favorites.save(FavoriteStream(
+                        name = name,
+                        address = if (protocol == "SRT") configuredSrtAddress(address) else address,
+                        protocol = protocol,
+                        srtMode = selectedSrtMode(),
+                        latencyMs = selectedLatencyMs(),
+                        deJitterMs = selectedDeJitterMs()
+                    ))
+                    Snackbar.make(binding.root, "Favorito salvo: $name", Snackbar.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+    }
+
+    private fun showFavorites() {
+        val items = favorites.get()
+        if (items.isEmpty()) {
+            Snackbar.make(binding.root, "Nenhum favorito salvo.", Snackbar.LENGTH_SHORT).show()
+            return
+        }
+        val labels = items.map { "${it.name}  •  ${it.protocol}" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Favoritos")
+            .setItems(labels) { _, index -> loadFavorite(items[index]) }
+            .setNeutralButton("Excluir…") { _, _ -> showDeleteFavorite(items) }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
+    private fun showDeleteFavorite(items: List<FavoriteStream>) {
+        AlertDialog.Builder(this)
+            .setTitle("Excluir favorito")
+            .setItems(items.map { it.name }.toTypedArray()) { _, index ->
+                favorites.remove(items[index].name)
+                Snackbar.make(binding.root, "Favorito excluído.", Snackbar.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun loadFavorite(item: FavoriteStream) {
+        selectProtocol(item.protocol)
+        binding.urlInput.setText(item.address)
+        binding.urlInput.setSelection(item.address.length)
+        binding.srtLatencyInput.setText(item.latencyMs.toString())
+        binding.srtDeJitterInput.setText(item.deJitterMs.toString())
+        binding.srtModeGroup.check(if (item.srtMode == "listener") R.id.chipListener else R.id.chipCaller)
+    }
+
+    private fun loadAddress(address: String) {
+        selectProtocol(address.substringBefore(":").uppercase())
+        binding.urlInput.setText(address)
+        binding.urlInput.setSelection(address.length)
+    }
+
+    private fun selectProtocol(protocol: String) {
+        val chip = when (protocol.uppercase()) {
+            "HLS", "HTTP", "HTTPS" -> R.id.chipHls
+            "RTMP" -> R.id.chipRtmp
+            "RTP" -> R.id.chipRtp
+            "UDP" -> R.id.chipUdp
+            else -> R.id.chipSrt
+        }
+        binding.protocolGroup.check(chip)
+        binding.srtOptionsPanel.isVisible = chip == R.id.chipSrt
     }
 
     private fun showDiagnostics() {
@@ -279,9 +381,42 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendDiagnostic(text: String): String = "$diagnostics\n\n$text".takeLast(12_000)
 
-    private fun maskAddress(address: String): String = address
-        .replace(Regex("(?i)(passphrase=)[^&]+"), "${'$'}1••••••••")
-        .replace(Regex("(?i)(token=)[^&]+"), "${'$'}1••••••••")
+    private fun privateAddressLabel(address: String): String =
+        "${address.substringBefore(":").uppercase()} •••••••• (endereço oculto)"
+
+    private fun sanitizeDiagnostic(text: String): String {
+        var result = text
+        activePrivateAddress?.let { result = result.replace(it, "••••••••") }
+        return result.replace(
+            Regex("(?i)(srt|https?|rtmp|rtp|udp)://[^\\s]+"),
+            "${'$'}1://••••••••"
+        )
+    }
+
+    private fun selectedSrtMode(): String =
+        if (binding.srtModeGroup.checkedChipId == R.id.chipListener) "listener" else "caller"
+
+    private fun selectedLatencyMs(): Int = binding.srtLatencyInput.text?.toString()
+        ?.toIntOrNull()?.coerceIn(0, 60_000) ?: 125
+
+    private fun selectedDeJitterMs(): Int = binding.srtDeJitterInput.text?.toString()
+        ?.toIntOrNull()?.coerceIn(0, 10_000) ?: 200
+
+    private fun configuredSrtAddress(address: String): String {
+        val base = address.substringBefore("?")
+        val existing = address.substringAfter("?", "").split("&")
+            .filter { it.isNotBlank() }
+            .filterNot {
+                val key = it.substringBefore("=")
+                key.equals("mode", true) || key.equals("latency", true)
+            }
+        val mode = selectedSrtMode()
+        val modeBase = if (mode == "listener")
+            base.replace(Regex("""(?i)^srt://[^/:?#]*(?=:\d+)"""), "srt://")
+        else base
+        val query = existing + listOf("mode=$mode", "latency=${selectedLatencyMs()}")
+        return "$modeBase?${query.joinToString("&")}"
+    }
 
     private fun normalizeSrtAddress(address: String): String {
         if (!address.contains(Regex("(?i)[?&]mode=listener(?:&|$)"))) return address

@@ -16,7 +16,7 @@ class SrtPlayer(context: Context, private val listener: Listener) {
         nativeCreate()
     }
 
-    fun play(uri: String, surface: Surface) = nativePlay(uri, surface)
+    fun play(uri: String, surface: Surface, deJitterMs: Int) = nativePlay(uri, surface, deJitterMs)
     fun stop() = nativeStop()
     fun release() = nativeRelease()
 
@@ -27,7 +27,7 @@ class SrtPlayer(context: Context, private val listener: Listener) {
     private fun onNativeDiagnostics(report: String) = listener.onSrtDiagnostics(report)
 
     private external fun nativeCreate()
-    private external fun nativePlay(uri: String, surface: Surface)
+    private external fun nativePlay(uri: String, surface: Surface, deJitterMs: Int)
     private external fun nativeStop()
     private external fun nativeRelease()
 
