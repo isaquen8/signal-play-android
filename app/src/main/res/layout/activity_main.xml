@@ -15,6 +15,11 @@
             android:visibility="gone"
             app:show_buffering="always"
             app:use_controller="false" />
+        <SurfaceView
+            android:id="@+id/srtSurface"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
         <LinearLayout android:id="@+id/emptyState" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="center" android:gravity="center" android:orientation="vertical" android:padding="24dp">
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="SIGNAL PLAY" android:textColor="@color/paper" android:textSize="20sp" android:textStyle="bold" />
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Pronto para receber um sinal" android:textColor="@color/muted" android:textSize="14sp" />
@@ -47,6 +52,7 @@
             android:visibility="gone" />
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:gravity="end" android:orientation="horizontal">
             <com.google.android.material.button.MaterialButton android:id="@+id/historyButton" style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Recentes" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/diagnosticsButton" style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Diagnóstico" />
             <com.google.android.material.button.MaterialButton android:id="@+id/stopButton" style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:enabled="false" android:text="Parar" />
             <com.google.android.material.button.MaterialButton android:id="@+id/playButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:text="Abrir sinal" />
         </LinearLayout>

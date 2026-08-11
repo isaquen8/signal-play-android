@@ -4,7 +4,11 @@ import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.view.View
+import android.view.SurfaceHolder
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import androidx.appcompat.app.AlertDialog
@@ -30,7 +34,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var player: MediaPlayer
     private lateinit var hlsPlayer: ExoPlayer
     private lateinit var recents: RecentStreams
+    private lateinit var srtPlayer: SrtPlayer
     private var fullscreen = false
+    private var pendingSrtAddress: String? = null
+    private var diagnostics = "Nenhum sinal analisado ainda."
     private var activeEngine = Engine.NONE
     private val timeoutHandler = Handler(Looper.getMainLooper())
     private val connectionTimeout = Runnable {
@@ -39,7 +46,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private enum class Engine { NONE, VLC, HLS }
+    private enum class Engine { NONE, VLC, HLS, SRT }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,6 +76,32 @@ class MainActivity : AppCompatActivity() {
                 }
             })
         }
+        srtPlayer = SrtPlayer(this, object : SrtPlayer.Listener {
+            override fun onSrtState(state: String, detail: String) = runOnUiThread {
+                diagnostics = appendDiagnostic("Estado SRT: $state\n$detail")
+                when (state) {
+                    "CONNECTING" -> setStatus("CONECTANDO", false)
+                    "BUFFERING" -> setStatus("BUFFER", false)
+                    "PLAYING" -> markPlaying()
+                    "ENDED" -> stopSignal()
+                    "ERROR" -> showPlaybackError("SRT: $detail")
+                }
+            }
+
+            override fun onSrtDiagnostics(report: String) = runOnUiThread {
+                diagnostics = appendDiagnostic(report)
+            }
+        })
+        binding.srtSurface.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                pendingSrtAddress?.let {
+                    pendingSrtAddress = null
+                    srtPlayer.play(normalizeSrtAddress(it), holder.surface)
+                }
+            }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+            override fun surfaceDestroyed(holder: SurfaceHolder) = Unit
+        })
 
         bindActions()
     }
@@ -77,6 +110,7 @@ class MainActivity : AppCompatActivity() {
         playButton.setOnClickListener { openSignal() }
         stopButton.setOnClickListener { stopSignal() }
         historyButton.setOnClickListener { showHistory() }
+        diagnosticsButton.setOnClickListener { showDiagnostics() }
         fullscreenButton.setOnClickListener { setFullscreen(!fullscreen) }
         urlInput.setOnEditorActionListener { _, action, _ ->
             if (action == EditorInfo.IME_ACTION_GO) { openSignal(); true } else false
@@ -116,12 +150,27 @@ class MainActivity : AppCompatActivity() {
                 setStatus("CONECTANDO", false)
                 timeoutHandler.removeCallbacks(connectionTimeout)
                 timeoutHandler.postDelayed(connectionTimeout, 15_000)
-                if (address.substringBefore(":").lowercase() in setOf("http", "https")) {
+                diagnostics = "Protocolo: ${address.substringBefore(":").uppercase()}\nEndereço: ${maskAddress(address)}"
+                if (address.startsWith("srt://", ignoreCase = true)) {
+                    openSrt(address)
+                } else if (address.substringBefore(":").lowercase() in setOf("http", "https")) {
                     openHls(address)
                 } else {
                     openVlc(address)
                 }
             }
+    }
+
+    private fun openSrt(address: String) {
+        activeEngine = Engine.SRT
+        binding.videoLayout.isVisible = false
+        binding.hlsPlayerView.isVisible = false
+        binding.srtSurface.isVisible = true
+        if (binding.srtSurface.holder.surface.isValid) {
+            srtPlayer.play(normalizeSrtAddress(address), binding.srtSurface.holder.surface)
+        } else {
+            pendingSrtAddress = address
+        }
     }
 
     private fun openHls(address: String) {
@@ -140,6 +189,7 @@ class MainActivity : AppCompatActivity() {
     private fun openVlc(address: String) {
         activeEngine = Engine.VLC
         binding.hlsPlayerView.isVisible = false
+        binding.srtSurface.isVisible = false
         binding.videoLayout.isVisible = true
         val media = Media(libVlc, android.net.Uri.parse(address)).apply {
             setHWDecoderEnabled(true, false)
@@ -165,6 +215,8 @@ class MainActivity : AppCompatActivity() {
         timeoutHandler.removeCallbacks(connectionTimeout)
         if (::player.isInitialized) player.stop()
         if (::hlsPlayer.isInitialized) hlsPlayer.stop()
+        if (::srtPlayer.isInitialized) srtPlayer.stop()
+        pendingSrtAddress = null
         activeEngine = Engine.NONE
     }
 
@@ -213,6 +265,29 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Fechar", null).show()
     }
 
+    private fun showDiagnostics() {
+        AlertDialog.Builder(this)
+            .setTitle("Diagnóstico do sinal")
+            .setMessage(diagnostics)
+            .setPositiveButton("Copiar") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Signal Play diagnóstico", diagnostics))
+            }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
+    private fun appendDiagnostic(text: String): String = "$diagnostics\n\n$text".takeLast(12_000)
+
+    private fun maskAddress(address: String): String = address
+        .replace(Regex("(?i)(passphrase=)[^&]+"), "${'$'}1••••••••")
+        .replace(Regex("(?i)(token=)[^&]+"), "${'$'}1••••••••")
+
+    private fun normalizeSrtAddress(address: String): String {
+        if (!address.contains(Regex("(?i)[?&]mode=listener(?:&|$)"))) return address
+        return address.replace(Regex("(?i)^srt://(?:0\.0\.0\.0|@)(?=:)"), "srt://")
+    }
+
     private fun setFullscreen(enabled: Boolean) {
         fullscreen = enabled
         binding.controlPanel.isVisible = !enabled
@@ -235,6 +310,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         timeoutHandler.removeCallbacksAndMessages(null)
         hlsPlayer.release()
+        srtPlayer.release()
         player.stop(); player.detachViews(); player.release(); libVlc.release()
         super.onDestroy()
     }

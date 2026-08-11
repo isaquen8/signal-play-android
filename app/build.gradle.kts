@@ -15,6 +15,12 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk { abiFilters += "arm64-v8a" }
+        externalNativeBuild {
+            ndkBuild {
+                arguments += "GSTREAMER_ROOT_ANDROID=${System.getenv("GSTREAMER_ROOT_ANDROID") ?: "missing-gstreamer-sdk"}"
+            }
+        }
     }
 
     buildTypes {
@@ -30,6 +36,9 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { viewBinding = true }
+    externalNativeBuild {
+        ndkBuild { path = file("src/main/jni/Android.mk") }
+    }
 }
 
 dependencies {

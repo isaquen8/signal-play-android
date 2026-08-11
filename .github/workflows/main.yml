@@ -21,6 +21,18 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
+      - name: Instalar NDK
+        run: sdkmanager "ndk;28.0.13004108"
+
+      - name: Preparar GStreamer com SRT
+        run: |
+          curl -L --fail --retry 3 --show-error \
+            https://gstreamer.freedesktop.org/data/pkg/android/1.28.6/gstreamer-1.0-android-universal-1.28.6.tar.xz \
+            -o "$RUNNER_TEMP/gstreamer.tar.xz"
+          mkdir -p "$RUNNER_TEMP/gstreamer"
+          tar --no-same-owner -xJf "$RUNNER_TEMP/gstreamer.tar.xz" -C "$RUNNER_TEMP/gstreamer" arm64
+          echo "GSTREAMER_ROOT_ANDROID=$RUNNER_TEMP/gstreamer/arm64" >> "$GITHUB_ENV"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
@@ -28,6 +40,11 @@ jobs:
       - run: bash scripts/verify_project.sh
 
       - run: gradle lintDebug testDebugUnitTest assembleDebug --stacktrace
+
+      - name: Confirmar módulo SRT no APK
+        run: |
+          unzip -p app/build/outputs/apk/debug/app-debug.apk lib/arm64-v8a/libgstreamer_android.so \
+            | strings | grep -q "srtsrc"
 
       - uses: actions/upload-artifact@v4
         with:
