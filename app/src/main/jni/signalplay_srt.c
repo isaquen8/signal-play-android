@@ -85,8 +85,16 @@ static GstBusSyncReply bus_sync(GstBus *bus, GstMessage *message, gpointer user_
 
 static void *player_thread(void *opaque) {
     PlayerData *data = opaque;
-    data->playbin = gst_element_factory_make("playbin3", "signal-play-srt");
-    if (!data->playbin) data->playbin = gst_element_factory_make("playbin", "signal-play-srt");
+    GstElementFactory *aac_factory = gst_element_factory_find("avdec_aac");
+    gboolean aac_available = aac_factory != NULL;
+    if (aac_factory) {
+        gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE(aac_factory), GST_RANK_PRIMARY + 100);
+        gst_object_unref(aac_factory);
+    }
+
+    /* playbin exposes deterministic current-audio selection for MPEG-TS. */
+    data->playbin = gst_element_factory_make("playbin", "signal-play-srt");
+    if (!data->playbin) data->playbin = gst_element_factory_make("playbin3", "signal-play-srt");
     if (!data->playbin) {
         send_state(data, "ERROR", "GStreamer não criou o pipeline de reprodução.");
         return NULL;
@@ -109,7 +117,8 @@ static void *player_thread(void *opaque) {
                      NULL);
     }
     if (audio_sink) {
-        g_object_set(audio_sink, "sync", TRUE, "async", FALSE, NULL);
+        /* The feed clock can be discontinuous; play audio as packets arrive. */
+        g_object_set(audio_sink, "sync", FALSE, "async", FALSE, NULL);
     }
 
     g_object_set(data->playbin,
@@ -121,6 +130,8 @@ static void *player_thread(void *opaque) {
         g_object_set(data->playbin, "volume", 1.0, NULL);
     if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "mute"))
         g_object_set(data->playbin, "mute", FALSE, NULL);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "current-audio"))
+        g_object_set(data->playbin, "current-audio", 0, NULL);
     if (video_sink) gst_object_unref(video_sink);
     if (audio_sink) gst_object_unref(audio_sink);
     if (data->de_jitter_ms > 0 &&
@@ -132,6 +143,12 @@ static void *player_thread(void *opaque) {
 
     GstBus *bus = gst_element_get_bus(data->playbin);
     gst_bus_set_sync_handler(bus, bus_sync, data, NULL);
+    gchar *audio_report = g_strdup_printf(
+        "Áudio: decoder AAC software=%s; saída OpenSL ES=%s; faixa selecionada=1; sync=desativado.",
+        aac_available ? "disponível" : "indisponível",
+        audio_sink ? "disponível" : "automática");
+    send_diagnostics(data, audio_report);
+    g_free(audio_report);
     send_state(data, "CONNECTING", "SRT inicializado; aguardando conexão e mídia.");
     gst_element_set_state(data->playbin, GST_STATE_PLAYING);
 
