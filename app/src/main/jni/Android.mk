@@ -9,6 +9,6 @@ include $(BUILD_SHARED_LIBRARY)
 
 GSTREAMER_PLUGINS := coreelements app audioconvert audioresample typefindfunctions \
     videoconvertscale playback autodetect audioparsers videoparsersbad \
-    androidmedia opensles opengl srt mpegtsdemux
+    androidmedia libav opensles opengl srt mpegtsdemux
 GSTREAMER_EXTRA_DEPS := gstreamer-video-1.0
 include $(GSTREAMER_ROOT)/share/gst-android/ndk-build/gstreamer-1.0.mk

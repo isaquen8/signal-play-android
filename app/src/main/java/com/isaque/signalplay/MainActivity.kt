@@ -7,6 +7,10 @@ import android.os.Looper
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.os.Build
 import android.view.View
 import android.view.SurfaceHolder
 import android.view.WindowManager
@@ -41,6 +45,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingSrtAddress: String? = null
     private var pendingSrtDeJitterMs = 200
     private var activePrivateAddress: String? = null
+    private lateinit var audioManager: AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
     private var diagnostics = "Nenhum sinal analisado ainda."
     private var activeEngine = Engine.NONE
     private val timeoutHandler = Handler(Looper.getMainLooper())
@@ -57,6 +63,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
         val preferences = getSharedPreferences("signal_play", MODE_PRIVATE)
         recents = RecentStreams(preferences)
@@ -178,6 +185,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openSrt(address: String, deJitterMs: Int) {
+        requestPlaybackAudioFocus()
         activeEngine = Engine.SRT
         binding.videoLayout.isVisible = false
         binding.hlsPlayerView.isVisible = false
@@ -235,7 +243,35 @@ class MainActivity : AppCompatActivity() {
         if (::srtPlayer.isInitialized) srtPlayer.stop()
         pendingSrtAddress = null
         activePrivateAddress = null
+        abandonPlaybackAudioFocus()
         activeEngine = Engine.NONE
+    }
+
+    private fun requestPlaybackAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build())
+                .setOnAudioFocusChangeListener { }
+                .build()
+            audioFocusRequest = request
+            audioManager.requestAudioFocus(request)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+        }
+    }
+
+    private fun abandonPlaybackAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
+            audioFocusRequest = null
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(null)
+        }
     }
 
     private fun onPlayerEvent(event: MediaPlayer.Event) = runOnUiThread {

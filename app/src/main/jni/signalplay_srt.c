@@ -109,7 +109,7 @@ static void *player_thread(void *opaque) {
                      NULL);
     }
     if (audio_sink) {
-        g_object_set(audio_sink, "sync", FALSE, "async", FALSE, NULL);
+        g_object_set(audio_sink, "sync", TRUE, "async", FALSE, NULL);
     }
 
     g_object_set(data->playbin,
@@ -117,6 +117,10 @@ static void *player_thread(void *opaque) {
                  "video-sink", video_sink,
                  "audio-sink", audio_sink,
                  NULL);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "volume"))
+        g_object_set(data->playbin, "volume", 1.0, NULL);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "mute"))
+        g_object_set(data->playbin, "mute", FALSE, NULL);
     if (video_sink) gst_object_unref(video_sink);
     if (audio_sink) gst_object_unref(audio_sink);
     if (data->de_jitter_ms > 0 &&
