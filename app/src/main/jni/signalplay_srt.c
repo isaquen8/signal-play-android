@@ -14,23 +14,27 @@ typedef struct {
     ANativeWindow *window;
     pthread_t thread;
     gboolean thread_started;
-    gboolean stopping;
+    gint stopping;
     gchar *uri;
     gint de_jitter_ms;
+    jlong session_id;
 
     /*
      * A/V sync state.
      *
      * MPEG-TS carried over SRT can arrive with perfectly valid encoder PTS/PCR
      * values whose time origin is far away from the Android playback running
-     * time.  We preserve the encoder's relative A/V timestamps, but translate
+     * time. We preserve the encoder's relative A/V timestamps, but translate
      * the complete timeline once so the first valid buffer is close to the
-     * current pipeline running time.  The same offset is then applied to both
+     * current pipeline running time. The same offset is then applied to both
      * sinks and both sinks synchronize against the same GstPipeline clock.
      */
     GMutex sync_lock;
     gboolean sync_anchor_set;
     gint64 sync_offset_ns;
+
+    /* Protects the shared playbin pointer while stop/switch races with cleanup. */
+    GMutex pipeline_lock;
 } PlayerData;
 
 typedef struct {
@@ -45,6 +49,7 @@ static jfieldID native_handle_field;
 static jmethodID state_method;
 static jmethodID diagnostics_method;
 static pthread_mutex_t player_lock = PTHREAD_MUTEX_INITIALIZER;
+static PlayerData *singleton;
 
 static JNIEnv *get_env(void) {
     JNIEnv *env = NULL;
@@ -53,17 +58,50 @@ static JNIEnv *get_env(void) {
     return env;
 }
 
+static GstElement *ref_active_playbin(PlayerData *data) {
+    GstElement *playbin = NULL;
+    g_mutex_lock(&data->pipeline_lock);
+    if (data->playbin) playbin = gst_object_ref(data->playbin);
+    g_mutex_unlock(&data->pipeline_lock);
+    return playbin;
+}
+
+static void publish_playbin(PlayerData *data, GstElement *playbin) {
+    g_mutex_lock(&data->pipeline_lock);
+    if (data->playbin) gst_object_unref(data->playbin);
+    data->playbin = playbin ? gst_object_ref(playbin) : NULL;
+    g_mutex_unlock(&data->pipeline_lock);
+}
+
+static void clear_published_playbin(PlayerData *data, GstElement *playbin) {
+    g_mutex_lock(&data->pipeline_lock);
+    if (data->playbin == playbin) {
+        gst_object_unref(data->playbin);
+        data->playbin = NULL;
+    }
+    g_mutex_unlock(&data->pipeline_lock);
+}
+
 static void send_text(PlayerData *data, jmethodID method, const gchar *first, const gchar *second) {
+    /* During an explicit stop/switch, never let callbacks from the old session escape. */
+    if (g_atomic_int_get(&data->stopping)) return;
+
     JNIEnv *env = get_env();
     jstring a = (*env)->NewStringUTF(env, first ? first : "");
     if (second) {
         jstring b = (*env)->NewStringUTF(env, second);
-        (*env)->CallVoidMethod(env, data->owner, method, a, b);
+        (*env)->CallVoidMethod(env, data->owner, method, data->session_id, a, b);
         (*env)->DeleteLocalRef(env, b);
     } else {
-        (*env)->CallVoidMethod(env, data->owner, method, a);
+        (*env)->CallVoidMethod(env, data->owner, method, data->session_id, a);
     }
     (*env)->DeleteLocalRef(env, a);
+
+    /* A callback must never poison the native playback thread. */
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
 }
 
 static void send_state(PlayerData *data, const gchar *state, const gchar *detail) {
@@ -111,6 +149,8 @@ static GstPadProbeReturn av_sync_probe(GstPad *pad, GstPadProbeInfo *info, gpoin
     PlayerData *data = context->player;
     GstPadProbeType type = GST_PAD_PROBE_INFO_TYPE(info);
 
+    if (g_atomic_int_get(&data->stopping)) return GST_PAD_PROBE_OK;
+
     if (type & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) {
         GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
         if (event && GST_EVENT_TYPE(event) == GST_EVENT_SEGMENT) {
@@ -145,23 +185,27 @@ static GstPadProbeReturn av_sync_probe(GstPad *pad, GstPadProbeInfo *info, gpoin
     gint64 offset_ns = 0;
 
     g_mutex_lock(&data->sync_lock);
-    if (!data->sync_anchor_set && data->playbin) {
-        GstClock *clock = gst_element_get_clock(data->playbin);
-        if (clock) {
-            GstClockTime clock_time = gst_clock_get_time(clock);
-            GstClockTime base_time = gst_element_get_base_time(data->playbin);
-            GstClockTime pipeline_running_time =
-                (GST_CLOCK_TIME_IS_VALID(base_time) && clock_time >= base_time)
-                    ? clock_time - base_time
-                    : 0;
+    if (!data->sync_anchor_set && !g_atomic_int_get(&data->stopping)) {
+        GstElement *playbin = ref_active_playbin(data);
+        if (playbin) {
+            GstClock *clock = gst_element_get_clock(playbin);
+            if (clock) {
+                GstClockTime clock_time = gst_clock_get_time(clock);
+                GstClockTime base_time = gst_element_get_base_time(playbin);
+                GstClockTime pipeline_running_time =
+                    (GST_CLOCK_TIME_IS_VALID(base_time) && clock_time >= base_time)
+                        ? clock_time - base_time
+                        : 0;
 
-            data->sync_offset_ns =
-                (gint64) pipeline_running_time - (gint64) stream_running_time;
-            data->sync_anchor_set = TRUE;
-            offset_ns = data->sync_offset_ns;
-            apply_shared_sync_offset(data, offset_ns);
-            anchored_now = TRUE;
-            gst_object_unref(clock);
+                data->sync_offset_ns =
+                    (gint64) pipeline_running_time - (gint64) stream_running_time;
+                data->sync_anchor_set = TRUE;
+                offset_ns = data->sync_offset_ns;
+                apply_shared_sync_offset(data, offset_ns);
+                anchored_now = TRUE;
+                gst_object_unref(clock);
+            }
+            gst_object_unref(playbin);
         }
     }
     g_mutex_unlock(&data->sync_lock);
@@ -207,7 +251,8 @@ static void reset_sync_anchor(PlayerData *data) {
 
 static GstBusSyncReply bus_sync(GstBus *bus, GstMessage *message, gpointer user_data) {
     PlayerData *data = user_data;
-    if (gst_is_video_overlay_prepare_window_handle_message(message) && data->window) {
+    if (!g_atomic_int_get(&data->stopping) &&
+        gst_is_video_overlay_prepare_window_handle_message(message) && data->window) {
         GstVideoOverlay *overlay = GST_VIDEO_OVERLAY(GST_MESSAGE_SRC(message));
         gst_video_overlay_set_window_handle(overlay, (guintptr) data->window);
         gst_message_unref(message);
@@ -225,16 +270,17 @@ static void *player_thread(void *opaque) {
         gst_object_unref(aac_factory);
     }
 
-    /* playbin exposes deterministic current-audio selection for MPEG-TS. */
-    data->playbin = gst_element_factory_make("playbin", "signal-play-srt");
-    if (!data->playbin) data->playbin = gst_element_factory_make("playbin3", "signal-play-srt");
-    if (!data->playbin) {
+    /* Use a thread-owned pipeline ref and publish a second guarded ref for stop(). */
+    GstElement *playbin = gst_element_factory_make("playbin", "signal-play-srt");
+    if (!playbin) playbin = gst_element_factory_make("playbin3", "signal-play-srt");
+    if (!playbin) {
         send_state(data, "ERROR", "GStreamer não criou o pipeline de reprodução.");
         return NULL;
     }
+    publish_playbin(data, playbin);
 
     /*
-     * Keep both sinks clock-synchronised.  A pad probe establishes one shared
+     * Keep both sinks clock-synchronised. A pad probe establishes one shared
      * timeline offset from the first valid decoded PTS, which prevents the old
      * MPEG-TS far-future timestamp stall without throwing away A/V timing.
      */
@@ -258,25 +304,25 @@ static void *player_thread(void *opaque) {
     install_sync_probe(data, data->video_sink, FALSE);
     install_sync_probe(data, data->audio_sink, TRUE);
 
-    g_object_set(data->playbin,
+    g_object_set(playbin,
                  "uri", data->uri,
                  "video-sink", data->video_sink,
                  "audio-sink", data->audio_sink,
                  NULL);
-    if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "volume"))
-        g_object_set(data->playbin, "volume", 1.0, NULL);
-    if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "mute"))
-        g_object_set(data->playbin, "mute", FALSE, NULL);
-    if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "current-audio"))
-        g_object_set(data->playbin, "current-audio", 0, NULL);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(playbin), "volume"))
+        g_object_set(playbin, "volume", 1.0, NULL);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(playbin), "mute"))
+        g_object_set(playbin, "mute", FALSE, NULL);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(playbin), "current-audio"))
+        g_object_set(playbin, "current-audio", 0, NULL);
     if (data->de_jitter_ms > 0 &&
-        g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "buffer-duration")) {
-        g_object_set(data->playbin,
+        g_object_class_find_property(G_OBJECT_GET_CLASS(playbin), "buffer-duration")) {
+        g_object_set(playbin,
                      "buffer-duration", (gint64) data->de_jitter_ms * GST_MSECOND,
                      NULL);
     }
 
-    GstBus *bus = gst_element_get_bus(data->playbin);
+    GstBus *bus = gst_element_get_bus(playbin);
     gst_bus_set_sync_handler(bus, bus_sync, data, NULL);
     gchar *audio_report = g_strdup_printf(
         "Áudio: decoder AAC software=%s; saída OpenSL ES=%s; faixa selecionada=1; sync=clock compartilhado.",
@@ -285,11 +331,16 @@ static void *player_thread(void *opaque) {
     send_diagnostics(data, audio_report);
     g_free(audio_report);
     send_state(data, "CONNECTING", "SRT inicializado; aguardando conexão e mídia.");
-    gst_element_set_state(data->playbin, GST_STATE_PLAYING);
+    gst_element_set_state(playbin, GST_STATE_PLAYING);
 
-    while (!data->stopping) {
+    while (!g_atomic_int_get(&data->stopping)) {
         GstMessage *message = gst_bus_timed_pop(bus, 250 * GST_MSECOND);
         if (!message) continue;
+        if (g_atomic_int_get(&data->stopping)) {
+            gst_message_unref(message);
+            break;
+        }
+
         switch (GST_MESSAGE_TYPE(message)) {
             case GST_MESSAGE_ERROR: {
                 GError *err = NULL; gchar *debug = NULL;
@@ -297,7 +348,7 @@ static void *player_thread(void *opaque) {
                 gchar *detail = g_strdup_printf("%s\n%s", err ? err->message : "Erro SRT", debug ? debug : "");
                 send_state(data, "ERROR", detail);
                 g_free(detail); g_clear_error(&err); g_free(debug);
-                data->stopping = TRUE;
+                g_atomic_int_set(&data->stopping, TRUE);
                 break;
             }
             case GST_MESSAGE_BUFFERING: {
@@ -335,15 +386,16 @@ static void *player_thread(void *opaque) {
             }
             case GST_MESSAGE_CLOCK_LOST:
                 reset_sync_anchor(data);
-                gst_element_set_state(data->playbin, GST_STATE_PAUSED);
-                gst_element_set_state(data->playbin, GST_STATE_PLAYING);
+                gst_element_set_state(playbin, GST_STATE_PAUSED);
+                gst_element_set_state(playbin, GST_STATE_PLAYING);
                 send_diagnostics(data, "A/V clock foi perdido; pipeline resincronizado e nova âncora será calculada.");
                 break;
             case GST_MESSAGE_STATE_CHANGED:
-                if (GST_MESSAGE_SRC(message) == GST_OBJECT(data->playbin)) {
+                if (GST_MESSAGE_SRC(message) == GST_OBJECT(playbin)) {
                     GstState old_s, new_s, pending;
                     gst_message_parse_state_changed(message, &old_s, &new_s, &pending);
-                    if (new_s == GST_STATE_PLAYING) send_state(data, "PLAYING", "Pipeline SRT em reprodução com A/V clock compartilhado.");
+                    if (new_s == GST_STATE_PLAYING)
+                        send_state(data, "PLAYING", "Pipeline SRT em reprodução com A/V clock compartilhado.");
                 }
                 break;
             case GST_MESSAGE_STREAM_COLLECTION: {
@@ -360,17 +412,23 @@ static void *player_thread(void *opaque) {
             }
             case GST_MESSAGE_EOS:
                 send_state(data, "ENDED", "O fluxo SRT foi encerrado pelo emissor.");
-                data->stopping = TRUE;
+                g_atomic_int_set(&data->stopping, TRUE);
                 break;
             default: break;
         }
         gst_message_unref(message);
     }
-    gst_element_set_state(data->playbin, GST_STATE_NULL);
+
+    /* Stop callbacks first, then detach the Android surface before releasing EGL. */
     gst_bus_set_sync_handler(bus, NULL, NULL, NULL);
+    if (data->video_sink && GST_IS_VIDEO_OVERLAY(data->video_sink))
+        gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(data->video_sink), 0);
+    gst_element_set_state(playbin, GST_STATE_NULL);
+
+    clear_published_playbin(data, playbin);
     gst_object_unref(bus);
-    gst_object_unref(data->playbin);
-    data->playbin = NULL;
+    gst_object_unref(playbin);
+
     if (data->video_sink) {
         gst_object_unref(data->video_sink);
         data->video_sink = NULL;
@@ -382,18 +440,40 @@ static void *player_thread(void *opaque) {
     return NULL;
 }
 
+static void stop_thread_locked(PlayerData *data) {
+    if (!data || !data->thread_started) return;
+
+    /* Mark the session stale before forcing the network pipeline down. */
+    g_atomic_int_set(&data->stopping, TRUE);
+
+    GstElement *playbin = ref_active_playbin(data);
+    if (playbin) {
+        /* This wakes SRT/network elements instead of waiting for their next packet. */
+        gst_element_set_state(playbin, GST_STATE_NULL);
+        gst_object_unref(playbin);
+    }
+
+    pthread_join(data->thread, NULL);
+    data->thread_started = FALSE;
+}
+
+static void release_window_locked(PlayerData *data) {
+    if (data->window) {
+        ANativeWindow_release(data->window);
+        data->window = NULL;
+    }
+}
+
 JNIEXPORT jboolean JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeClassInit(JNIEnv *env, jclass klass) {
     native_handle_field = (*env)->GetFieldID(env, klass, "nativeHandle", "J");
     if (!native_handle_field) {
         /* Kotlin does not declare the field; native state is held globally per activity instance. */
         (*env)->ExceptionClear(env);
     }
-    state_method = (*env)->GetMethodID(env, klass, "onNativeState", "(Ljava/lang/String;Ljava/lang/String;)V");
-    diagnostics_method = (*env)->GetMethodID(env, klass, "onNativeDiagnostics", "(Ljava/lang/String;)V");
+    state_method = (*env)->GetMethodID(env, klass, "onNativeState", "(JLjava/lang/String;Ljava/lang/String;)V");
+    diagnostics_method = (*env)->GetMethodID(env, klass, "onNativeDiagnostics", "(JLjava/lang/String;)V");
     return state_method && diagnostics_method;
 }
-
-static PlayerData *singleton;
 
 JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeCreate(JNIEnv *env, jobject thiz) {
     pthread_mutex_lock(&player_lock);
@@ -401,44 +481,77 @@ JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeCreate(JNIEnv 
         singleton = g_new0(PlayerData, 1);
         singleton->owner = (*env)->NewGlobalRef(env, thiz);
         g_mutex_init(&singleton->sync_lock);
+        g_mutex_init(&singleton->pipeline_lock);
+        g_atomic_int_set(&singleton->stopping, TRUE);
     }
     pthread_mutex_unlock(&player_lock);
 }
 
-JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativePlay(JNIEnv *env, jobject thiz, jstring uri, jobject surface, jint de_jitter_ms) {
-    if (!singleton) return;
-    if (singleton->thread_started) {
-        singleton->stopping = TRUE;
-        pthread_join(singleton->thread, NULL);
-        singleton->thread_started = FALSE;
+JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativePlay(
+    JNIEnv *env,
+    jobject thiz,
+    jstring uri,
+    jobject surface,
+    jint de_jitter_ms,
+    jlong session_id) {
+
+    pthread_mutex_lock(&player_lock);
+    if (!singleton) {
+        pthread_mutex_unlock(&player_lock);
+        return;
     }
+
+    stop_thread_locked(singleton);
+    release_window_locked(singleton);
+
     g_free(singleton->uri);
     const char *value = (*env)->GetStringUTFChars(env, uri, NULL);
     singleton->uri = g_strdup(value);
     (*env)->ReleaseStringUTFChars(env, uri, value);
-    if (singleton->window) ANativeWindow_release(singleton->window);
+
     singleton->window = ANativeWindow_fromSurface(env, surface);
     singleton->de_jitter_ms = de_jitter_ms < 0 ? 0 : de_jitter_ms;
-    singleton->stopping = FALSE;
-    singleton->thread_started = pthread_create(&singleton->thread, NULL, player_thread, singleton) == 0;
+    singleton->session_id = session_id;
+    g_atomic_int_set(&singleton->stopping, FALSE);
+
+    singleton->thread_started = pthread_create(
+        &singleton->thread, NULL, player_thread, singleton) == 0;
+
+    if (!singleton->thread_started) {
+        send_state(singleton, "ERROR", "Não foi possível criar a thread do player SRT.");
+        g_atomic_int_set(&singleton->stopping, TRUE);
+    }
+    pthread_mutex_unlock(&player_lock);
 }
 
 JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeStop(JNIEnv *env, jobject thiz) {
-    if (!singleton || !singleton->thread_started) return;
-    singleton->stopping = TRUE;
-    pthread_join(singleton->thread, NULL);
-    singleton->thread_started = FALSE;
+    pthread_mutex_lock(&player_lock);
+    if (singleton) {
+        stop_thread_locked(singleton);
+        release_window_locked(singleton);
+    }
+    pthread_mutex_unlock(&player_lock);
 }
 
 JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeRelease(JNIEnv *env, jobject thiz) {
-    if (!singleton) return;
-    Java_com_isaque_signalplay_SrtPlayer_nativeStop(env, thiz);
-    if (singleton->window) ANativeWindow_release(singleton->window);
+    pthread_mutex_lock(&player_lock);
+    if (!singleton) {
+        pthread_mutex_unlock(&player_lock);
+        return;
+    }
+
+    stop_thread_locked(singleton);
+    release_window_locked(singleton);
     g_free(singleton->uri);
+    singleton->uri = NULL;
+
     (*env)->DeleteGlobalRef(env, singleton->owner);
+    singleton->owner = NULL;
+    g_mutex_clear(&singleton->pipeline_lock);
     g_mutex_clear(&singleton->sync_lock);
     g_free(singleton);
     singleton = NULL;
+    pthread_mutex_unlock(&player_lock);
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
