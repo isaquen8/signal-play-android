@@ -9,13 +9,36 @@
 typedef struct {
     jobject owner;
     GstElement *playbin;
+    GstElement *video_sink;
+    GstElement *audio_sink;
     ANativeWindow *window;
     pthread_t thread;
     gboolean thread_started;
     gboolean stopping;
     gchar *uri;
     gint de_jitter_ms;
+
+    /*
+     * A/V sync state.
+     *
+     * MPEG-TS carried over SRT can arrive with perfectly valid encoder PTS/PCR
+     * values whose time origin is far away from the Android playback running
+     * time.  We preserve the encoder's relative A/V timestamps, but translate
+     * the complete timeline once so the first valid buffer is close to the
+     * current pipeline running time.  The same offset is then applied to both
+     * sinks and both sinks synchronize against the same GstPipeline clock.
+     */
+    GMutex sync_lock;
+    gboolean sync_anchor_set;
+    gint64 sync_offset_ns;
 } PlayerData;
+
+typedef struct {
+    PlayerData *player;
+    gboolean audio;
+    GstSegment segment;
+    gboolean have_segment;
+} SyncPadContext;
 
 static JavaVM *java_vm;
 static jfieldID native_handle_field;
@@ -72,6 +95,116 @@ static gchar *stream_report(GstStreamCollection *collection) {
     return g_string_free(out, FALSE);
 }
 
+static void apply_shared_sync_offset(PlayerData *data, gint64 offset_ns) {
+    if (data->video_sink &&
+        g_object_class_find_property(G_OBJECT_GET_CLASS(data->video_sink), "ts-offset")) {
+        g_object_set(data->video_sink, "ts-offset", offset_ns, NULL);
+    }
+    if (data->audio_sink &&
+        g_object_class_find_property(G_OBJECT_GET_CLASS(data->audio_sink), "ts-offset")) {
+        g_object_set(data->audio_sink, "ts-offset", offset_ns, NULL);
+    }
+}
+
+static GstPadProbeReturn av_sync_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    SyncPadContext *context = user_data;
+    PlayerData *data = context->player;
+    GstPadProbeType type = GST_PAD_PROBE_INFO_TYPE(info);
+
+    if (type & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) {
+        GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
+        if (event && GST_EVENT_TYPE(event) == GST_EVENT_SEGMENT) {
+            const GstSegment *segment = NULL;
+            gst_event_parse_segment(event, &segment);
+            if (segment && segment->format == GST_FORMAT_TIME) {
+                context->segment = *segment;
+                context->have_segment = TRUE;
+            }
+        } else if (event && GST_EVENT_TYPE(event) == GST_EVENT_FLUSH_STOP) {
+            context->have_segment = FALSE;
+            gst_segment_init(&context->segment, GST_FORMAT_TIME);
+        }
+        return GST_PAD_PROBE_OK;
+    }
+
+    if (!(type & GST_PAD_PROBE_TYPE_BUFFER) || !context->have_segment)
+        return GST_PAD_PROBE_OK;
+
+    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!buffer || !GST_BUFFER_PTS_IS_VALID(buffer))
+        return GST_PAD_PROBE_OK;
+
+    GstClockTime stream_running_time = gst_segment_to_running_time(
+        &context->segment,
+        GST_FORMAT_TIME,
+        GST_BUFFER_PTS(buffer));
+    if (!GST_CLOCK_TIME_IS_VALID(stream_running_time))
+        return GST_PAD_PROBE_OK;
+
+    gboolean anchored_now = FALSE;
+    gint64 offset_ns = 0;
+
+    g_mutex_lock(&data->sync_lock);
+    if (!data->sync_anchor_set && data->playbin) {
+        GstClock *clock = gst_element_get_clock(data->playbin);
+        if (clock) {
+            GstClockTime clock_time = gst_clock_get_time(clock);
+            GstClockTime base_time = gst_element_get_base_time(data->playbin);
+            GstClockTime pipeline_running_time =
+                (GST_CLOCK_TIME_IS_VALID(base_time) && clock_time >= base_time)
+                    ? clock_time - base_time
+                    : 0;
+
+            data->sync_offset_ns =
+                (gint64) pipeline_running_time - (gint64) stream_running_time;
+            data->sync_anchor_set = TRUE;
+            offset_ns = data->sync_offset_ns;
+            apply_shared_sync_offset(data, offset_ns);
+            anchored_now = TRUE;
+            gst_object_unref(clock);
+        }
+    }
+    g_mutex_unlock(&data->sync_lock);
+
+    if (anchored_now) {
+        gchar *report = g_strdup_printf(
+            "A/V clock: âncora=%s; offset comum=%+.1f ms; áudio/vídeo sincronizados pelo clock do pipeline.",
+            context->audio ? "áudio" : "vídeo",
+            (gdouble) offset_ns / (gdouble) GST_MSECOND);
+        send_diagnostics(data, report);
+        g_free(report);
+    }
+
+    return GST_PAD_PROBE_OK;
+}
+
+static void install_sync_probe(PlayerData *data, GstElement *sink, gboolean audio) {
+    if (!sink) return;
+    GstPad *pad = gst_element_get_static_pad(sink, "sink");
+    if (!pad) return;
+
+    SyncPadContext *context = g_new0(SyncPadContext, 1);
+    context->player = data;
+    context->audio = audio;
+    gst_segment_init(&context->segment, GST_FORMAT_TIME);
+
+    gst_pad_add_probe(
+        pad,
+        GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM | GST_PAD_PROBE_TYPE_BUFFER,
+        av_sync_probe,
+        context,
+        g_free);
+    gst_object_unref(pad);
+}
+
+static void reset_sync_anchor(PlayerData *data) {
+    g_mutex_lock(&data->sync_lock);
+    data->sync_anchor_set = FALSE;
+    data->sync_offset_ns = 0;
+    apply_shared_sync_offset(data, 0);
+    g_mutex_unlock(&data->sync_lock);
+}
+
 static GstBusSyncReply bus_sync(GstBus *bus, GstMessage *message, gpointer user_data) {
     PlayerData *data = user_data;
     if (gst_is_video_overlay_prepare_window_handle_message(message) && data->window) {
@@ -101,30 +234,34 @@ static void *player_thread(void *opaque) {
     }
 
     /*
-     * Broadcast MPEG-TS feeds can carry PCR/PTS values that are valid for the
-     * encoder clock but far ahead of Android's playback clock.  A synchronized
-     * video sink then renders the first preroll frame and waits indefinitely.
-     * SRT is live, so render frames as soon as they reach the device.
+     * Keep both sinks clock-synchronised.  A pad probe establishes one shared
+     * timeline offset from the first valid decoded PTS, which prevents the old
+     * MPEG-TS far-future timestamp stall without throwing away A/V timing.
      */
-    GstElement *video_sink = gst_element_factory_make("glimagesink", "signal-play-video");
-    GstElement *audio_sink = gst_element_factory_make("openslessink", "signal-play-audio");
-    if (video_sink) {
-        g_object_set(video_sink,
-                     "sync", FALSE,
+    data->video_sink = gst_element_factory_make("glimagesink", "signal-play-video");
+    data->audio_sink = gst_element_factory_make("openslessink", "signal-play-audio");
+    if (data->video_sink) {
+        g_object_set(data->video_sink,
+                     "sync", TRUE,
                      "async", FALSE,
-                     "qos", FALSE,
+                     "qos", TRUE,
                      "enable-last-sample", FALSE,
                      NULL);
+        if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->video_sink), "max-lateness"))
+            g_object_set(data->video_sink, "max-lateness", (gint64) 120 * GST_MSECOND, NULL);
     }
-    if (audio_sink) {
-        /* The feed clock can be discontinuous; play audio as packets arrive. */
-        g_object_set(audio_sink, "sync", FALSE, "async", FALSE, NULL);
+    if (data->audio_sink) {
+        g_object_set(data->audio_sink, "sync", TRUE, "async", FALSE, NULL);
     }
+
+    reset_sync_anchor(data);
+    install_sync_probe(data, data->video_sink, FALSE);
+    install_sync_probe(data, data->audio_sink, TRUE);
 
     g_object_set(data->playbin,
                  "uri", data->uri,
-                 "video-sink", video_sink,
-                 "audio-sink", audio_sink,
+                 "video-sink", data->video_sink,
+                 "audio-sink", data->audio_sink,
                  NULL);
     if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "volume"))
         g_object_set(data->playbin, "volume", 1.0, NULL);
@@ -132,8 +269,6 @@ static void *player_thread(void *opaque) {
         g_object_set(data->playbin, "mute", FALSE, NULL);
     if (g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "current-audio"))
         g_object_set(data->playbin, "current-audio", 0, NULL);
-    if (video_sink) gst_object_unref(video_sink);
-    if (audio_sink) gst_object_unref(audio_sink);
     if (data->de_jitter_ms > 0 &&
         g_object_class_find_property(G_OBJECT_GET_CLASS(data->playbin), "buffer-duration")) {
         g_object_set(data->playbin,
@@ -144,9 +279,9 @@ static void *player_thread(void *opaque) {
     GstBus *bus = gst_element_get_bus(data->playbin);
     gst_bus_set_sync_handler(bus, bus_sync, data, NULL);
     gchar *audio_report = g_strdup_printf(
-        "Áudio: decoder AAC software=%s; saída OpenSL ES=%s; faixa selecionada=1; sync=desativado.",
+        "Áudio: decoder AAC software=%s; saída OpenSL ES=%s; faixa selecionada=1; sync=clock compartilhado.",
         aac_available ? "disponível" : "indisponível",
-        audio_sink ? "disponível" : "automática");
+        data->audio_sink ? "disponível" : "automática");
     send_diagnostics(data, audio_report);
     g_free(audio_report);
     send_state(data, "CONNECTING", "SRT inicializado; aguardando conexão e mídia.");
@@ -187,11 +322,28 @@ static void *player_thread(void *opaque) {
                 g_free(detail);
                 break;
             }
+            case GST_MESSAGE_NEW_CLOCK: {
+                GstClock *clock = NULL;
+                gst_message_parse_new_clock(message, &clock);
+                if (clock) {
+                    gchar *detail = g_strdup_printf(
+                        "A/V clock mestre selecionado: %s.", GST_OBJECT_NAME(clock));
+                    send_diagnostics(data, detail);
+                    g_free(detail);
+                }
+                break;
+            }
+            case GST_MESSAGE_CLOCK_LOST:
+                reset_sync_anchor(data);
+                gst_element_set_state(data->playbin, GST_STATE_PAUSED);
+                gst_element_set_state(data->playbin, GST_STATE_PLAYING);
+                send_diagnostics(data, "A/V clock foi perdido; pipeline resincronizado e nova âncora será calculada.");
+                break;
             case GST_MESSAGE_STATE_CHANGED:
                 if (GST_MESSAGE_SRC(message) == GST_OBJECT(data->playbin)) {
                     GstState old_s, new_s, pending;
                     gst_message_parse_state_changed(message, &old_s, &new_s, &pending);
-                    if (new_s == GST_STATE_PLAYING) send_state(data, "PLAYING", "Pipeline SRT em reprodução.");
+                    if (new_s == GST_STATE_PLAYING) send_state(data, "PLAYING", "Pipeline SRT em reprodução com A/V clock compartilhado.");
                 }
                 break;
             case GST_MESSAGE_STREAM_COLLECTION: {
@@ -200,7 +352,7 @@ static void *player_thread(void *opaque) {
                 gchar *report = stream_report(collection);
                 send_diagnostics(data, report);
                 gchar *detail = g_strdup_printf(
-                    "Mídia detectada; de-jitter configurado em %d ms.", data->de_jitter_ms);
+                    "Mídia detectada; de-jitter configurado em %d ms; A/V sync ativo.", data->de_jitter_ms);
                 send_state(data, "MEDIA", detail);
                 g_free(detail);
                 g_free(report); gst_object_unref(collection);
@@ -219,6 +371,14 @@ static void *player_thread(void *opaque) {
     gst_object_unref(bus);
     gst_object_unref(data->playbin);
     data->playbin = NULL;
+    if (data->video_sink) {
+        gst_object_unref(data->video_sink);
+        data->video_sink = NULL;
+    }
+    if (data->audio_sink) {
+        gst_object_unref(data->audio_sink);
+        data->audio_sink = NULL;
+    }
     return NULL;
 }
 
@@ -240,6 +400,7 @@ JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeCreate(JNIEnv 
     if (!singleton) {
         singleton = g_new0(PlayerData, 1);
         singleton->owner = (*env)->NewGlobalRef(env, thiz);
+        g_mutex_init(&singleton->sync_lock);
     }
     pthread_mutex_unlock(&player_lock);
 }
@@ -275,6 +436,7 @@ JNIEXPORT void JNICALL Java_com_isaque_signalplay_SrtPlayer_nativeRelease(JNIEnv
     if (singleton->window) ANativeWindow_release(singleton->window);
     g_free(singleton->uri);
     (*env)->DeleteGlobalRef(env, singleton->owner);
+    g_mutex_clear(&singleton->sync_lock);
     g_free(singleton);
     singleton = NULL;
 }
